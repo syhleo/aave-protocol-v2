@@ -8,6 +8,11 @@ import {ILendingPoolAddressesProvider} from '../../interfaces/ILendingPoolAddres
 import {DataTypes} from '../libraries/types/DataTypes.sol';
 
 contract LendingPoolStorage {
+
+  /**
+   * using ReserveLogic for DataTypes.ReserveData; 将 ReserveLogic 库中的函数绑定到 DataTypes.ReserveData 结构体上。
+    这样可以让你直接在 DataTypes.ReserveData 类型的变量上调用库中的函数，使代码更加简洁和易读。
+   */
   using ReserveLogic for DataTypes.ReserveData;
   using ReserveConfiguration for DataTypes.ReserveConfigurationMap;
   using UserConfiguration for DataTypes.UserConfigurationMap;

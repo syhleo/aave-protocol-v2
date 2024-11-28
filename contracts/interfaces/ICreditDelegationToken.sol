@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: agpl-3.0
 pragma solidity 0.6.12;
 
+/**
+信用授权/信用（信贷）委托
+ */
 interface ICreditDelegationToken {
   event BorrowAllowanceDelegated(
     address indexed fromUser,

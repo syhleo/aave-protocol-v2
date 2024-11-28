@@ -16,6 +16,7 @@ import {Errors} from '../helpers/Errors.sol';
 import {DataTypes} from '../types/DataTypes.sol';
 
 /**
+  资产相关的计算逻辑库
  * @title ReserveLogic library
  * @author Aave
  * @notice Implements the logic to update the reserves state
@@ -53,6 +54,7 @@ library ReserveLogic {
    * A value of 2*1e27 means for each unit of asset one unit of income has been accrued
    * @param reserve The reserve object
    * @return the normalized income. expressed in ray
+    返回的是白皮书的NIt
    **/
   function getNormalizedIncome(DataTypes.ReserveData storage reserve)
     internal
@@ -104,16 +106,18 @@ library ReserveLogic {
   }
 
   /**
+   * 更新reserve的liquidityIndex和variableBorrowIndex，以及lastUpdateTimestamp。
    * @dev Updates the liquidity cumulative index and the variable borrow index.
    * @param reserve the reserve object
    **/
   function updateState(DataTypes.ReserveData storage reserve) internal {
+    // 获取浮动债务的 scaled 数量，即缩放到 t_0 时刻的总数量
     uint256 scaledVariableDebt =
       IVariableDebtToken(reserve.variableDebtTokenAddress).scaledTotalSupply();
     uint256 previousVariableBorrowIndex = reserve.variableBorrowIndex;
     uint256 previousLiquidityIndex = reserve.liquidityIndex;
     uint40 lastUpdatedTimestamp = reserve.lastUpdateTimestamp;
-
+    // 更新reserve的liquidityIndex和variableBorrowIndex，以及lastUpdateTimestamp
     (uint256 newLiquidityIndex, uint256 newVariableBorrowIndex) =
       _updateIndexes(
         reserve,
@@ -122,7 +126,7 @@ library ReserveLogic {
         previousVariableBorrowIndex,
         lastUpdatedTimestamp
       );
-
+    // 若有新增资产将其中一部分存入金库 ？
     _mintToTreasury(
       reserve,
       scaledVariableDebt,
@@ -190,20 +194,25 @@ library ReserveLogic {
   }
 
   /**
+    更新reserve储备库的当前稳定借款利率、当前可变借款利率和当前流动性利率
    * @dev Updates the reserve current stable borrow rate, the current variable borrow rate and the current liquidity rate
    * @param reserve The address of the reserve to be updated
+     liquidityAdded和liquidityTaken这两个参数是相对于池子来说的，
+     比如：deposit操作 liquidityAdded 就是 deposit 的数量， liquidityTaken 就是 0
+          borrow操作 liquidityAdded 就是 0， liquidityTaken 就是 borrow 的数量
    * @param liquidityAdded The amount of liquidity added to the protocol (deposit or repay) in the previous action
    * @param liquidityTaken The amount of liquidity taken from the protocol (redeem or borrow)
    **/
   function updateInterestRates(
-    DataTypes.ReserveData storage reserve,
-    address reserveAddress,
-    address aTokenAddress,
-    uint256 liquidityAdded,
-    uint256 liquidityTaken
+    DataTypes.ReserveData storage reserve,// 需要更新的目标资产数据
+    address reserveAddress, // 资产地址
+    address aTokenAddress, // aToken 地址
+    uint256 liquidityAdded, // 增加的流动性数量 
+    uint256 liquidityTaken // 减少的流动性数量
   ) internal {
+    // 初始化相关变量到缓存
     UpdateInterestRatesLocalVars memory vars;
-
+    // 缓存固定债务的token地址
     vars.stableDebtTokenAddress = reserve.stableDebtTokenAddress;
 
     (vars.totalStableDebt, vars.avgStableRate) = IStableDebtToken(vars.stableDebtTokenAddress)
@@ -212,14 +221,16 @@ library ReserveLogic {
     //calculates the total variable debt locally using the scaled total supply instead
     //of totalSupply(), as it's noticeably cheaper. Also, the index has been
     //updated by the previous updateState() call
+    // 池子浮动债务总量（本息总额） = 浮动债务总量（不含利息） * 浮动利率指数
     vars.totalVariableDebt = IVariableDebtToken(reserve.variableDebtTokenAddress)
       .scaledTotalSupply()
       .rayMul(reserve.variableBorrowIndex);
 
+    // 更新利率，调用利率模型合约计算利率
     (
-      vars.newLiquidityRate,
-      vars.newStableRate,
-      vars.newVariableRate
+      vars.newLiquidityRate,// 当前最新的流动性利率
+      vars.newStableRate,// 稳定类型债务的最新利率
+      vars.newVariableRate // 浮动类型债务的最新利率
     ) = IReserveInterestRateStrategy(reserve.interestRateStrategyAddress).calculateInterestRates(
       reserveAddress,
       aTokenAddress,
@@ -325,6 +336,7 @@ library ReserveLogic {
   }
 
   /**
+   * 此函数，更新reserve的liquidityIndex和variableBorrowIndex，以及lastUpdateTimestamp
    * @dev Updates the reserve indexes and the timestamp of the update
    * @param reserve The reserve reserve to be updated
    * @param scaledVariableDebt The scaled variable debt
@@ -332,11 +344,11 @@ library ReserveLogic {
    * @param variableBorrowIndex The last stored variable borrow index
    **/
   function _updateIndexes(
-    DataTypes.ReserveData storage reserve,
-    uint256 scaledVariableDebt,
-    uint256 liquidityIndex,
-    uint256 variableBorrowIndex,
-    uint40 timestamp
+    DataTypes.ReserveData storage reserve,// 需要更新的资产数据
+    uint256 scaledVariableDebt, // 浮动债务数量（统一缩放到 t_0 时刻）
+    uint256 liquidityIndex, //每单位流动性的本息（本金+利息）总额
+    uint256 variableBorrowIndex,// 每单位浮动利率类型债务的累计本息总额
+    uint40 timestamp // 这个就是：lastUpdatedTimestamp，即reserve.lastUpdateTimestamp;
   ) internal returns (uint256, uint256) {
     uint256 currentLiquidityRate = reserve.currentLiquidityRate;
 
@@ -344,19 +356,34 @@ library ReserveLogic {
     uint256 newVariableBorrowIndex = variableBorrowIndex;
 
     //only cumulating if there is any income being produced
+    // 只有当有收益率时，执行累计逻辑
     if (currentLiquidityRate > 0) {
+      /**
+        累计收益率 通过计算将年化收益率切分成每秒，然后线性累加这段时间的收益率
+         1 + ratePerSecond * (delta_t / seconds in a year)
+       */
       uint256 cumulatedLiquidityInterest =
         MathUtils.calculateLinearInterest(currentLiquidityRate, timestamp);
+
+      // 更新每单位流动性的本息总额
       newLiquidityIndex = cumulatedLiquidityInterest.rayMul(liquidityIndex);
       require(newLiquidityIndex <= type(uint128).max, Errors.RL_LIQUIDITY_INDEX_OVERFLOW);
-
+      // 由于newLiquidityIndex是uint256，这里要转换
       reserve.liquidityIndex = uint128(newLiquidityIndex);
 
+      
       //as the liquidity rate might come only from stable rate loans, we need to ensure
       //that there is actual variable debt before accumulating
+      // 当有浮动类型债务时，更新浮动债务的每单位累计本息总额
       if (scaledVariableDebt != 0) {
+        /**
+        【二项式近似法】
+        将年化利率切分成每秒，然后以时间差为指数计算复利后的每单位累计本息总额
+        (1 + ratePerSecond) ^ delta_t
+         */
         uint256 cumulatedVariableBorrowInterest =
           MathUtils.calculateCompoundedInterest(reserve.currentVariableBorrowRate, timestamp);
+        // 更新浮动债务的每单位累计本息总额
         newVariableBorrowIndex = cumulatedVariableBorrowInterest.rayMul(variableBorrowIndex);
         require(
           newVariableBorrowIndex <= type(uint128).max,
@@ -367,6 +394,7 @@ library ReserveLogic {
     }
 
     //solium-disable-next-line
+    // 记录更新的时间戳
     reserve.lastUpdateTimestamp = uint40(block.timestamp);
     return (newLiquidityIndex, newVariableBorrowIndex);
   }

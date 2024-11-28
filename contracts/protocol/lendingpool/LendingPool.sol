@@ -27,6 +27,8 @@ import {DataTypes} from '../libraries/types/DataTypes.sol';
 import {LendingPoolStorage} from './LendingPoolStorage.sol';
 
 /**
+  aToken是Aave 协议中的份额币，用来代表用户在协议中的存款。
+  用户在 Aave 协议中存入某种资产（例如 DAI、ETH 等）后，会收到相应的 aToken（如 aDAI、aETH）作为存款的凭证。
  * @title LendingPool contract
  * @dev Main point of interaction with an Aave protocol's market
  * - Users can:
@@ -51,6 +53,9 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
 
   uint256 public constant LENDINGPOOL_REVISION = 0x2;
 
+  /**
+   *  修饰器 要求处于非暂停交易状态
+   */
   modifier whenNotPaused() {
     _whenNotPaused();
     _;
@@ -91,15 +96,21 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
   }
 
   /**
+   * 存款
+   * 用户的存款操作通过 LendingPool 的 deposit 方法实现。
+     这是用户成为流动性提供者的主要方式，存入资产后可以获得相应的 aTokens，并自动赚取利息。
+
    * @dev Deposits an `amount` of underlying asset into the reserve, receiving in return overlying aTokens.
    * - E.g. User deposits 100 USDC and gets in return 100 aUSDC
-   * @param asset The address of the underlying asset to deposit
-   * @param amount The amount to be deposited
+   * @param asset The address of the underlying asset to deposit 用户想要存入的加密资产的地址。例如，用户可以选择存入的资产是 ETH、DAI 或 USDC 等支持的代币。
+   * @param amount The amount to be deposited 用户想要存入的资产数量。例如，用户希望存入 100 DAI 或 1 ETH。这个数量由用户决定。
    * @param onBehalfOf The address that will receive the aTokens, same as msg.sender if the user
    *   wants to receive them on his own wallet, or a different address if the beneficiary of aTokens
    *   is a different wallet
-   * @param referralCode Code used to register the integrator originating the operation, for potential rewards.
-   *   0 if the action is executed directly by the user, without any middle-man
+      onBehalfOf：表示为谁存款。如果用户希望为自己存款，他们会将自己的地址传入该参数。如果他们希望为他人存款，他们可以指定另一个地址。
+      
+   * @param referralCode（推荐码） Code used to register the integrator originating the operation, for potential rewards.
+   *   0 if the action is executed directly by the user, without any middle-man 推荐码。用于推荐奖励机制，这个参数可选，可以为 0 或由具体的推荐人代码决定。
    **/
   function deposit(
     address asset,
@@ -107,24 +118,35 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
     address onBehalfOf,
     uint16 referralCode
   ) external override whenNotPaused {
+    // 获取存入的资产合约的储备池对象，
     DataTypes.ReserveData storage reserve = _reserves[asset];
 
     ValidationLogic.validateDeposit(reserve, amount);
-
+    // 获取抵押资产对应的 aToken 地址
     address aToken = reserve.aTokenAddress;
 
+    // 更新资产的状态变量，即更新reserve的liquidityIndex和variableBorrowIndex，以及lastUpdateTimestamp。
     reserve.updateState();
+    // 更新资产的利率模型变量，即更新reserve储备库的当前稳定借款利率、当前可变借款利率和当前流动性利率
     reserve.updateInterestRates(asset, aToken, amount, 0);
 
+
+    /**
+      LINK-aEthLINK举例
+      aToken （aEthLINK）: 0x3FfAf50D4F4E96eB78f2407c090b72e86eCaed24 
+      asset（LINK）： 0xf8Fb3713D459D7C1018BD0A49D19b4C44290EBE5
+     */
     IERC20(asset).safeTransferFrom(msg.sender, aToken, amount);
 
+    // isFirstDeposit 代表该资产是否是用户第一次存入或之前抵押余额为0
     bool isFirstDeposit = IAToken(aToken).mint(onBehalfOf, amount, reserve.liquidityIndex);
 
+    // 若第一次被存入，默认将用户 onBehalfOf 的配置中相应资产转为可抵押类型
     if (isFirstDeposit) {
       _usersConfig[onBehalfOf].setUsingAsCollateral(reserve.id, true);
       emit ReserveUsedAsCollateralEnabled(asset, onBehalfOf);
     }
-
+    // 广播事件
     emit Deposit(asset, msg.sender, onBehalfOf, amount, referralCode);
   }
 
@@ -142,16 +164,18 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
   function withdraw(
     address asset,
     uint256 amount,
-    address to
+    address to // 赎回资产的转账的目标地址（接受赎回资产的地址）
   ) external override whenNotPaused returns (uint256) {
     DataTypes.ReserveData storage reserve = _reserves[asset];
 
     address aToken = reserve.aTokenAddress;
 
+    // // 查询aToken数量，（本金加利息）总额
     uint256 userBalance = IAToken(aToken).balanceOf(msg.sender);
 
     uint256 amountToWithdraw = amount;
 
+    // 如果是 uin256 最大值，赎回用户所有余额，注意会包括本金和利息的所有余额
     if (amount == type(uint256).max) {
       amountToWithdraw = userBalance;
     }
@@ -171,6 +195,7 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
 
     reserve.updateInterestRates(asset, aToken, 0, amountToWithdraw);
 
+    // 如果用户赎回了全部余额，则设置用户的该资产不再是抵押品
     if (amountToWithdraw == userBalance) {
       _usersConfig[msg.sender].setUsingAsCollateral(reserve.id, false);
       emit ReserveUsedAsCollateralDisabled(asset, msg.sender);
@@ -203,25 +228,28 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
     uint256 amount,
     uint256 interestRateMode,
     uint16 referralCode,
-    address onBehalfOf
+    address onBehalfOf // 债务承担者地址
   ) external override whenNotPaused {
+    // 根据asset地址获取资产的相关数据
     DataTypes.ReserveData storage reserve = _reserves[asset];
-
+    // 调用借贷内部方法
     _executeBorrow(
       ExecuteBorrowParams(
-        asset,
-        msg.sender,
-        onBehalfOf,
-        amount,
-        interestRateMode,
-        reserve.aTokenAddress,
-        referralCode,
-        true
+        asset,// 借贷资产地址
+        msg.sender,// 借贷受益人
+        onBehalfOf,// 还款人
+        amount,// 借贷数量
+        interestRateMode,// 借贷类型 固定 1 浮动 2
+        reserve.aTokenAddress,// aToken地址
+        referralCode, // 推荐码
+        true // 是否释放借贷资产给受益人，一般为true
       )
     );
   }
 
   /**
+   * 偿还债务，并销毁相应的 debtToken。
+   * https://github.com/Dapp-Learning-DAO/Dapp-Learning/blob/main/defi/Aave/contract/9-LendingPool.md
    * @notice Repays a borrowed `amount` on a specific reserve, burning the equivalent debt tokens owned
    * - E.g. User repays 100 USDC, burning 100 variable/stable debt tokens of the `onBehalfOf` address
    * @param asset The address of the borrowed underlying asset previously borrowed
@@ -236,8 +264,8 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
   function repay(
     address asset,
     uint256 amount,
-    uint256 rateMode,
-    address onBehalfOf
+    uint256 rateMode, // 偿还借贷的利率类型，固定 1，浮动 2
+    address onBehalfOf // 承担债务的用户地址，默认填写 msg.sender
   ) external override whenNotPaused returns (uint256) {
     DataTypes.ReserveData storage reserve = _reserves[asset];
 
@@ -290,9 +318,10 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
   }
 
   /**
+   切换用户(msg.sender)特定资产的借贷模式，浮动或固定利率。
    * @dev Allows a borrower to swap his debt between stable and variable mode, or viceversa
    * @param asset The address of the underlying asset borrowed
-   * @param rateMode The rate mode that the user wants to swap to
+   * @param rateMode The rate mode that the user wants to swap to  设置借贷的利率类型，固定 1，浮动 2
    **/
   function swapBorrowRateMode(address asset, uint256 rateMode) external override whenNotPaused {
     DataTypes.ReserveData storage reserve = _reserves[asset];
@@ -380,9 +409,11 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
   }
 
   /**
+   * 设置用户(msg.sender)特定资产是否作为抵押品。
    * @dev Allows depositors to enable/disable a specific deposited asset as collateral
    * @param asset The address of the underlying asset deposited
    * @param useAsCollateral `true` if the user wants to use the deposit as collateral, `false` otherwise
+     true 代表设置为抵押品
    **/
   function setUserUseReserveAsCollateral(address asset, bool useAsCollateral)
     external
@@ -402,6 +433,7 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
       _addressesProvider.getPriceOracle()
     );
 
+    // 将用户设置的bitmap相应的位修改数值 （0 或 1）
     _usersConfig[msg.sender].setUsingAsCollateral(reserve.id, useAsCollateral);
 
     if (useAsCollateral) {
@@ -412,6 +444,10 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
   }
 
   /**
+    清算：
+    【清算人（可以是任何人）、清算机器人】付出借出债务的代币（0%~Aave V2 规定的上限 50%），以当前折扣价买入被清算的抵押物（(市场价/代还款)*(1+奖励比例)，
+    其中奖励比例就是清算人比起在正常市场中购买代币，在 Aave V2 清算中能额外获得的利润）。
+   清算健康系数低于 1 的资产
    * @dev Function to liquidate a non-healthy position collateral-wise, with Health Factor below 1
    * - The caller (liquidator) covers `debtToCover` amount of debt of the user getting liquidated, and receives
    *   a proportionally amount of the `collateralAsset` plus a bonus to cover market risk
@@ -653,7 +689,8 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
   /**
    * @dev Returns the normalized income per unit of asset
    * @param asset The address of the underlying asset of the reserve
-   * @return The reserve's normalized income
+   * @return The reserve's normalized income  
+     白皮书的NIt 【通俗点讲，就是：创世时刻的一块钱在t时刻相当于几块钱。这么个意思】
    */
   function getReserveNormalizedIncome(address asset)
     external
@@ -828,6 +865,7 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
   }
 
   /**
+   * 设置暂停状态
    * @dev Set the _pause state of a reserve
    * - Only callable by the LendingPoolConfigurator contract
    * @param val `true` to pause the reserve, `false` to un-pause it
@@ -842,22 +880,27 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
   }
 
   struct ExecuteBorrowParams {
-    address asset;
-    address user;
-    address onBehalfOf;
-    uint256 amount;
-    uint256 interestRateMode;
-    address aTokenAddress;
-    uint16 referralCode;
-    bool releaseUnderlying;
+    address asset; //借贷资产地址
+    address user; //借贷受益人
+    address onBehalfOf; // 还款人
+    uint256 amount; // 借贷数量
+    uint256 interestRateMode; // 借贷类型 固定 1 浮动 2
+    address aTokenAddress; // aToken地址
+    uint16 referralCode; // 推荐码
+    bool releaseUnderlying; // 是否释放借贷资产给受益人，一般为true
   }
 
   function _executeBorrow(ExecuteBorrowParams memory vars) internal {
+
+    // 从storage中读取借贷资产信息
     DataTypes.ReserveData storage reserve = _reserves[vars.asset];
+    // 从storage中读取用户设置信息
     DataTypes.UserConfigurationMap storage userConfig = _usersConfig[vars.onBehalfOf];
 
+    // 获取预言机价格提供合约的地址
     address oracle = _addressesProvider.getPriceOracle();
 
+    // 把借贷的代币按照市场价格转换成ETH的数量
     uint256 amountInETH =
       IPriceOracleGetter(oracle).getAssetPrice(vars.asset).mul(vars.amount).div(
         10**reserve.configuration.getDecimals()
@@ -878,12 +921,18 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
       oracle
     );
 
+    // 更新资产状态
     reserve.updateState();
 
     uint256 currentStableRate = 0;
 
+    // 代表是否是该用户在此资产上的第一笔借贷
     bool isFirstBorrowing = false;
+    //根据是固定利率借款还是浮动利率借款铸造债务代币debtToken (它们分别是不同的token)
     if (DataTypes.InterestRateMode(vars.interestRateMode) == DataTypes.InterestRateMode.STABLE) {
+      // 使用固定利率的借贷
+
+      // 读取当前的固定借贷利率
       currentStableRate = reserve.currentStableBorrowRate;
 
       isFirstBorrowing = IStableDebtToken(reserve.stableDebtTokenAddress).mint(
@@ -893,6 +942,7 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
         currentStableRate
       );
     } else {
+      // 使用浮动利率的借贷
       isFirstBorrowing = IVariableDebtToken(reserve.variableDebtTokenAddress).mint(
         vars.user,
         vars.onBehalfOf,
@@ -901,17 +951,19 @@ contract LendingPool is VersionedInitializable, ILendingPool, LendingPoolStorage
       );
     }
 
+    // 如果是该用户的第一笔借贷，自动将该资产设为用户的借贷资产类
     if (isFirstBorrowing) {
       userConfig.setBorrowing(reserve.id, true);
     }
-
+    // 更新利率
     reserve.updateInterestRates(
       vars.asset,
       vars.aTokenAddress,
-      0,
-      vars.releaseUnderlying ? vars.amount : 0
+      0, // liquidityAdded
+      vars.releaseUnderlying ? vars.amount : 0 // 根据是否释放了借贷资产来判断liquidityTaken的数量
     );
 
+    // 转移借贷的资产给用户
     if (vars.releaseUnderlying) {
       IAToken(vars.aTokenAddress).transferUnderlyingTo(vars.user, vars.amount);
     }

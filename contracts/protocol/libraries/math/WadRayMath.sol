@@ -19,6 +19,10 @@ library WadRayMath {
   uint256 internal constant WAD_RAY_RATIO = 1e9;
 
   /**
+   * 在 Solidity 中，1 ray 是一个【标准化】的数值单位，通常用于高精度的金融计算。
+    1 ray 等于 10^27，即 1 后面有 27 个 0。【为了高精度计算】
+   这个单位的设计目的是为了在进行浮点数运算时避免精度损失，因为 Solidity 本身不支持浮点数运算。
+   *
    * @return One ray, 1e27
    **/
   function ray() internal pure returns (uint256) {
@@ -79,6 +83,7 @@ library WadRayMath {
   }
 
   /**
+  rayMul用于在ray单位下进行乘法运算，确保精度。
    * @dev Multiplies two ray, rounding half up to the nearest ray
    * @param a Ray
    * @param b Ray

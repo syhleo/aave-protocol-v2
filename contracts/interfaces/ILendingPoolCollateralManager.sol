@@ -2,6 +2,7 @@
 pragma solidity 0.6.12;
 
 /**
+Collateral：抵押品
  * @title ILendingPoolCollateralManager
  * @author Aave
  * @notice Defines the actions involving management of collateral in the protocol.

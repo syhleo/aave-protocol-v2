@@ -78,7 +78,11 @@ contract VariableDebtToken is DebtTokenBase, IVariableDebtToken {
     if (scaledBalance == 0) {
       return 0;
     }
-
+    /**
+    内部调用了 ReserveLogic 的 getNormalizedDebt 方法
+    返回最新的 variableBorrowIndex
+    scaledBalance * variableBorrowIndex
+     */
     return scaledBalance.rayMul(_pool.getReserveNormalizedVariableDebt(_underlyingAsset));
   }
 
@@ -101,17 +105,21 @@ contract VariableDebtToken is DebtTokenBase, IVariableDebtToken {
     if (user != onBehalfOf) {
       _decreaseBorrowAllowance(onBehalfOf, user, amount);
     }
-
+    // super.balanceOf(user)实际记账数量（缩放到t0时刻的数量）
     uint256 previousBalance = super.balanceOf(onBehalfOf);
+
+    // 该笔贷款的缩放到t_0时刻的数量
     uint256 amountScaled = amount.rayDiv(index);
     require(amountScaled != 0, Errors.CT_INVALID_MINT_AMOUNT);
 
     _mint(onBehalfOf, amountScaled);
 
+    // 发送事件仍用缩放前的数量
     emit Transfer(address(0), onBehalfOf, amount);
     emit Mint(user, onBehalfOf, amount, index);
 
-    return previousBalance == 0;
+    // 是否为第一笔贷款
+    return previousBalance == 0; 
   }
 
   /**
@@ -126,9 +134,11 @@ contract VariableDebtToken is DebtTokenBase, IVariableDebtToken {
     uint256 amount,
     uint256 index
   ) external override onlyLendingPool {
+    // 对数量缩放到t_0时刻
     uint256 amountScaled = amount.rayDiv(index);
     require(amountScaled != 0, Errors.CT_INVALID_BURN_AMOUNT);
 
+    // 销毁 amountScaled 数量
     _burn(user, amountScaled);
 
     emit Transfer(user, address(0), amount);

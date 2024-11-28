@@ -8,6 +8,7 @@ import {SafeMath} from '../../dependencies/openzeppelin/contracts/SafeMath.sol';
 import {IAaveIncentivesController} from '../../interfaces/IAaveIncentivesController.sol';
 
 /**
+Incentivized奖励币种
  * @title ERC20
  * @notice Basic ERC20 implementation
  * @author Aave, inspired by the Openzeppelin ERC20 implementation

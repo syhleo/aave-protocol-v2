@@ -31,6 +31,7 @@ library UserConfiguration {
   }
 
   /**
+  设置用户在某特定资产上有无抵押
    * @dev Sets if the user is using as collateral the reserve identified by reserveIndex
    * @param self The configuration object
    * @param reserveIndex The index of the reserve in the bitmap
@@ -38,10 +39,11 @@ library UserConfiguration {
    **/
   function setUsingAsCollateral(
     DataTypes.UserConfigurationMap storage self,
-    uint256 reserveIndex,
-    bool usingAsCollateral
+    uint256 reserveIndex, // 资产的序号
+    bool usingAsCollateral // 是否有抵押
   ) internal {
     require(reserveIndex < 128, Errors.UL_INVALID_INDEX);
+    // 改变表示资产配置两位数的第一位
     self.data =
       (self.data & ~(1 << (reserveIndex * 2 + 1))) |
       (uint256(usingAsCollateral ? 1 : 0) << (reserveIndex * 2 + 1));
